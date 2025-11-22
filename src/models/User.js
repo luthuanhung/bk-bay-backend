@@ -112,11 +112,11 @@ const createUser = async (user) => {
             sellerRequest.input('userId', sql.VarChar, userId);
             await sellerRequest.query(`INSERT INTO Seller (Id) VALUES (@userId)`);
         }
-        else if (roleLower === 'admin') {
-            const adminRequest = new sql.Request(transaction);
-            adminRequest.input('userId', sql.VarChar, userId);
-            await adminRequest.query(`INSERT INTO Admin (Id) VALUES (@userId)`);
-        }
+        // else if (roleLower === 'admin') {
+        //     const adminRequest = new sql.Request(transaction);
+        //     adminRequest.input('userId', sql.VarChar, userId);
+        //     await adminRequest.query(`INSERT INTO Admin (Id) VALUES (@userId)`);
+        // }
         else if (roleLower === 'shipper') { 
             const shipperRequest = new sql.Request(transaction);
             shipperRequest.input('userId', sql.VarChar, userId);
