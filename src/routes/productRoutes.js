@@ -4,15 +4,15 @@ const verifyToken = require('../middleware/auth');
 
 const {
     getCategories,
-    getProductBySeller,
     getProductByName,
     getAllProduct,
+    getProductByCategory,
     getProductDetails
 } = require('../controllers/productController');
 
 // Public routes
 router.get('/categories', getCategories);
-router.get('/seller/:sellerId', getProductBySeller);
+router.get('/categories', getProductByCategory);
 
 // Search by name: /api/products/search?name=apple
 router.get('/search', getProductByName);

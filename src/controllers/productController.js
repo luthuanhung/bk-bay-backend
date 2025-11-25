@@ -153,10 +153,36 @@ const getProductDetails = async (req, res) => {
     }
 };
 
+const getProductByCategory = async (req, res) => {
+    try {
+        // accept category from either route param or query string
+        const category = req.params.category || req.query.category;
+        if (!category) {
+            return res.status(400).json({
+                success: false,
+                message: 'category is required (use /category/:category or ?category=...)'
+            });
+        }
+
+        const products = await productModel.getProductByCategory(category);
+
+        res.status(200).json({
+            success: true,
+            products
+        });
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch products for category',
+            error: err.message
+        });
+    }
+};
+
 module.exports = {
     getCategories,
-    getProductBySeller,
+    getProductByCategory,
     getProductByName,
     getAllProduct,
-    getProductDetails
+    getProductDetails,
 };
