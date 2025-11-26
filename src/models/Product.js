@@ -2,44 +2,53 @@ const pool = require('../config/database');
 const sql = require('mssql');
 const { generateId } = require('../utils/userUtils');
 
-// This model targets the Product_SKU table (see SQLTestCart.sql)
-// Schema used in your DB:
-// Bar_code (PK), Name, Manufacturing_date, Expired_date, Description, sellerID
-
 async function listProductsBySeller(sellerId, opts = {}) {
   // Accept either `orderBy` or `sortBy` from the caller
   const { limit = 20, offset = 0, search, minPrice, maxPrice, size, color, order = 'DESC' } = opts;
+  const { category, stock: stockFilter, hasImages } = opts;
   const orderBy = opts.orderBy || opts.sortBy || 'BarCode';
   const request = pool.request();
   request.input('sellerId', sql.VarChar, sellerId);
   request.input('limit', sql.Int, limit);
   request.input('offset', sql.Int, offset);
 
-  const where = ['sellerID = @sellerId'];
-  if (search) { request.input('search', sql.VarChar, `%${search}%`); where.push('(Name LIKE @search OR BarCode LIKE @search)'); }
+  const where = ['p.sellerID = @sellerId'];
+  if (search) { request.input('search', sql.VarChar, `%${search}%`); where.push("(p.[Name] LIKE @search OR p.Bar_code LIKE @search)"); }
   if (minPrice !== undefined) { request.input('minPrice', sql.Decimal(18,2), minPrice); where.push('Price >= @minPrice'); }
   if (maxPrice !== undefined) { request.input('maxPrice', sql.Decimal(18,2), maxPrice); where.push('Price <= @maxPrice'); }
   if (size) { request.input('size', sql.VarChar, size); where.push('Size = @size'); }
   if (color) { request.input('color', sql.VarChar, color); where.push('Color = @color'); }
+  if (category) { request.input('category', sql.VarChar, category); where.push('EXISTS (SELECT 1 FROM Belongs_to b WHERE b.Barcode = p.Bar_code AND b.CategoryName = @category)'); }
+  if (stockFilter) {
+    if (stockFilter === 'in') {
+      where.push('EXISTS (SELECT 1 FROM VARIATIONS v WHERE v.Bar_code = p.Bar_code AND v.STOCK > 0)');
+    } else if (stockFilter === 'out') {
+      // Consider product out-of-stock when either:
+      // - there exists a variation with STOCK = 0 (single-zero variation), OR
+      // - there are no variations with STOCK > 0 (all zero or none)
+      where.push('(EXISTS (SELECT 1 FROM VARIATIONS v WHERE v.Bar_code = p.Bar_code AND (v.STOCK = 0 OR v.STOCK IS NULL)) OR NOT EXISTS (SELECT 1 FROM VARIATIONS v WHERE v.Bar_code = p.Bar_code AND v.STOCK > 0))');
+    }
+  }
+  if (hasImages) {
+    if (hasImages === 'with') where.push('EXISTS (SELECT 1 FROM IMAGES im WHERE im.Bar_code = p.Bar_code)');
+    else if (hasImages === 'without') where.push('NOT EXISTS (SELECT 1 FROM IMAGES im WHERE im.Bar_code = p.Bar_code)');
+  }
 
   const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
-  // Map friendly sort names to actual DB columns (avoid invalid column names)
   const columnMap = {
-    BarCode: 'Bar_code',
-    Name: '[Name]',
-    Manufacturing_date: 'Manufacturing_date',
-    Manufacture_Date: 'Manufacturing_date',
-    ManufactureDate: 'Manufacturing_date',
-    Expired_date: 'Expired_date'
+    BarCode: 'p.Bar_code',
+    Name: 'p.[Name]',
+    Manufacturing_date: 'p.Manufacturing_date',
+    Expired_date: 'p.Expired_date'
   };
 
-  const orderCol = columnMap[orderBy] || 'Bar_code';
+  const orderCol = columnMap[orderBy] || 'p.Bar_code';
   const dir = (order && order.toUpperCase() === 'ASC') ? 'ASC' : 'DESC';
 
   // Select and alias DB columns to stable JS property names (BarCode, Name, Manufacturing_date, Expired_date, Description, sellerID)
   // Include one image URL per product (top 1) if available using OUTER APPLY for efficiency
-  const query = `SELECT p.Bar_code AS BarCode, p.[Name] AS Name, p.Manufacturing_date AS Manufacturing_date, p.Expired_date AS Expired_date, p.Description AS Description, p.sellerID AS sellerID, i.IMAGE_URL AS IMAGE_URL
+  const query = `SELECT p.Bar_code, p.[Name] AS Name, p.Manufacturing_date, p.Expired_date, p.Description, p.sellerID, i.IMAGE_URL
   FROM Product_SKU p
   OUTER APPLY (SELECT TOP 1 IMAGE_URL FROM IMAGES WHERE Bar_code = p.Bar_code) i
   ${whereClause} ORDER BY ${orderCol} ${dir} OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`;
@@ -56,7 +65,7 @@ async function getProductByBarcode(sellerId, barCode) {
   const request = pool.request();
   request.input('barCode', sql.VarChar, barCode);
   request.input('sellerId', sql.VarChar, sellerId);
-  const result = await request.query('SELECT Bar_code AS BarCode, [Name] AS Name, Manufacturing_date AS Manufacturing_date, Expired_date AS Expired_date, Description AS Description, sellerID AS sellerID FROM Product_SKU WHERE Bar_code = @barCode AND sellerID = @sellerId');
+  const result = await request.query('SELECT Bar_code, [Name] AS Name, Manufacturing_date, Expired_date, Description, sellerID FROM Product_SKU WHERE Bar_code = @barCode AND sellerID = @sellerId');
   const product = result.recordset[0];
   if (!product) return null;
 
@@ -64,7 +73,7 @@ async function getProductByBarcode(sellerId, barCode) {
   try {
     const vReq = pool.request();
     vReq.input('barCode', sql.VarChar, barCode);
-    const vRes = await vReq.query('SELECT NAME AS name, PRICE AS price, Stock AS stock FROM VARIATIONS WHERE Bar_code = @barCode');
+    const vRes = await vReq.query('SELECT NAME, PRICE, STOCK FROM VARIATIONS WHERE Bar_code = @barCode');
     product.variations = vRes.recordset || [];
   } catch (e) {
     // Variations table or Stock column may not exist in some schemas — fail gracefully
@@ -98,14 +107,14 @@ async function createProduct(sellerId, data) {
   const transaction = new sql.Transaction(pool);
   try {
     await transaction.begin();
-    const barCode = data.barCode || data.BarCode || generateId();
+    const barCode = data.Bar_code || generateId();
 
     const req = new sql.Request(transaction);
     req.input('barCode', sql.VarChar, barCode);
-    req.input('name', sql.VarChar, data.name || data.Name || '');
-    req.input('manufacturingDate', sql.Date, data.manufacturingDate || data.Manufacturing_date || null);
-    req.input('expiredDate', sql.Date, data.expiredDate || data.Expired_date || null);
-    req.input('description', sql.NVarChar, data.description || data.Description || null);
+    req.input('name', sql.VarChar, data.Name || '');
+    req.input('manufacturingDate', sql.Date, data.Manufacturing_date || null);
+    req.input('expiredDate', sql.Date, data.Expired_date || null);
+    req.input('description', sql.NVarChar, data.Description || null);
     req.input('sellerId', sql.VarChar, sellerId);
 
     await req.query(`
@@ -131,6 +140,33 @@ async function createProduct(sellerId, data) {
   }
 }
 
+// Add variations to an existing product (creates a transaction internally)
+async function addVariationsForProduct(sellerId, barCode, variations) {
+  const transaction = new sql.Transaction(pool);
+  try {
+    await transaction.begin();
+    const req = new sql.Request(transaction);
+    req.input('barCode', sql.VarChar, barCode);
+    req.input('sellerId', sql.VarChar, sellerId);
+
+    // Verify product exists and belongs to this seller
+    const check = await req.query('SELECT Bar_code FROM Product_SKU WHERE Bar_code = @barCode AND sellerID = @sellerId');
+    if (!check.recordset || check.recordset.length === 0) {
+      await transaction.rollback();
+      return { success: false, reason: 'not_found' };
+    }
+
+    // Reuse existing persistVariations that expects a transaction
+    await persistVariations(transaction, barCode, variations);
+
+    await transaction.commit();
+    return { success: true };
+  } catch (err) {
+    try { await transaction.rollback(); } catch (e) {}
+    throw err;
+  }
+}
+
 async function updateProduct(sellerId, barCode, data) {
   const transaction = new sql.Transaction(pool);
   try {
@@ -140,10 +176,12 @@ async function updateProduct(sellerId, barCode, data) {
     req.input('sellerId', sql.VarChar, sellerId);
 
     const sets = [];
-    if (data.name !== undefined) { req.input('name', sql.VarChar, data.name); sets.push('[Name] = @name'); }
-    if (data.manufacturingDate !== undefined) { req.input('manufacturingDate', sql.Date, data.manufacturingDate); sets.push('Manufacturing_date = @manufacturingDate'); }
-    if (data.expiredDate !== undefined) { req.input('expiredDate', sql.Date, data.expiredDate); sets.push('Expired_date = @expiredDate'); }
-    if (data.description !== undefined) { req.input('description', sql.NVarChar, data.description); sets.push('Description = @description'); }
+      // Accept both DB-named fields (Name, Manufacturing_date, Expired_date, Description)
+      // and legacy camelCase fields (name, manufacturingDate, expiredDate, description).
+      if (data.Name !== undefined) { req.input('name', sql.VarChar, data.Name); sets.push('[Name] = @name'); }
+      if (data.Manufacturing_date !== undefined) { req.input('manufacturingDate', sql.Date, data.Manufacturing_date); sets.push('Manufacturing_date = @manufacturingDate'); }
+      if (data.Expired_date !== undefined) { req.input('expiredDate', sql.Date, data.Expired_date); sets.push('Expired_date = @expiredDate'); }
+      if (data.Description !== undefined) { req.input('description', sql.NVarChar, data.Description); sets.push('Description = @description'); }
 
     if (!sets.length) {
       await transaction.rollback();
@@ -214,7 +252,7 @@ async function persistVariations(transaction, barCode, variations) {
   await delReq.query('DELETE FROM VARIATIONS WHERE Bar_code = @barCode');
 
   // Determine if 'Stock' column exists
-  const hasStock = await hasColumn(transaction, 'VARIATIONS', 'Stock');
+  const hasStock = await hasColumn(transaction, 'VARIATIONS', 'STOCK');
 
   // Build batch insert with parameters to avoid SQL injection
   const inserts = [];
@@ -223,11 +261,11 @@ async function persistVariations(transaction, barCode, variations) {
   variations.forEach((v, idx) => {
     const n = `name${idx}`;
     const p = `price${idx}`;
-    req.input(n, sql.VarChar, v.NAME || v.name || '');
-    req.input(p, sql.Decimal(18,2), v.PRICE !== undefined ? v.PRICE : (v.price !== undefined ? v.price : 0));
+    req.input(n, sql.VarChar, v.NAME || '');
+    req.input(p, sql.Decimal(18,2), v.PRICE !== undefined ? v.PRICE : 0);
     if (hasStock) {
       const s = `stock${idx}`;
-      req.input(s, sql.Int, v.Stock !== undefined ? v.Stock : (v.stock !== undefined ? v.stock : 0));
+      req.input(s, sql.Int, v.STOCK !== undefined ? v.STOCK : 0);
       inserts.push(`(@barCode, @${n}, @${p}, @${s})`);
     } else {
       inserts.push(`(@barCode, @${n}, @${p})`);
@@ -237,7 +275,7 @@ async function persistVariations(transaction, barCode, variations) {
   if (!inserts.length) return;
 
   const insertQuery = hasStock
-    ? `INSERT INTO VARIATIONS (Bar_code, NAME, PRICE, Stock) VALUES ${inserts.join(',')}`
+    ? `INSERT INTO VARIATIONS (Bar_code, NAME, PRICE, STOCK) VALUES ${inserts.join(',')}`
     : `INSERT INTO VARIATIONS (Bar_code, NAME, PRICE) VALUES ${inserts.join(',')}`;
 
   await req.query(insertQuery);
@@ -270,4 +308,5 @@ module.exports = {
   createProduct,
   updateProduct,
   deleteProduct,
+  addVariationsForProduct,
 };

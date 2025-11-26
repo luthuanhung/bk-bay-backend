@@ -1,25 +1,70 @@
 const productModel = require('../models/Product');
 const userModel = require('../models/User');
 
-// Normalize incoming payloads to the model's expected camelCase keys.
-// This helps handle different client payload shapes (Name vs name, Manufacturing_date vs manufacturingDate, etc.)
-function normalizeProductPayload(data) {
-  if (!data || typeof data !== 'object') return {};
+// Strict validation + mapping for product payloads.
+// API expects the exact field names (no fuzzy matching):
+// - Bar_code (string) required for create
+// - Name (string) required for create
+// - Description (string) optional
+// - Manufacturing_date (ISO date string) optional
+// - Expired_date (ISO date string) optional
+// - variations: array of { NAME: string, PRICE: number, STOCK?: number } optional
+// - category: string optional
+// This function validates and maps API fields to the model's camelCase fields.
+function validateAndMapProductPayload(data, { forUpdate = false } = {}) {
+  if (!data || typeof data !== 'object') return { error: 'Invalid payload', fieldErrors: { _payload: 'Expected JSON object' } };
+
+  const fieldErrors = {};
   const out = {};
-  if (data.Name !== undefined) out.name = data.Name;
-  if (data.name !== undefined) out.name = data.name;
-  if (data.Description !== undefined) out.description = data.Description;
-  if (data.description !== undefined) out.description = data.description;
-  if (data.Manufacturing_date !== undefined) out.manufacturingDate = data.Manufacturing_date;
-  if (data.manufacturingDate !== undefined) out.manufacturingDate = data.manufacturingDate;
-  if (data.Expired_date !== undefined) out.expiredDate = data.Expired_date;
-  if (data.expiredDate !== undefined) out.expiredDate = data.expiredDate;
-  if (data.variations !== undefined) out.variations = data.variations;
-  if (data.category !== undefined) out.category = data.category;
-  if (data.Bar_code !== undefined) out.barCode = data.Bar_code;
-  if (data.BarCode !== undefined) out.barCode = data.BarCode;
-  if (data.barCode !== undefined) out.barCode = data.barCode;
-  return out;
+
+  // For create, require explicit Bar_code and Name
+  if (!forUpdate) {
+    if (!data.Bar_code || typeof data.Bar_code !== 'string') fieldErrors.Bar_code = 'Bar_code (string) is required';
+    if (!data.Name || typeof data.Name !== 'string') fieldErrors.Name = 'Name (string) is required';
+  }
+
+  // Optional fields (must use exact names if present)
+  if (data.Description !== undefined) {
+    if (typeof data.Description !== 'string') fieldErrors.Description = 'Description must be a string';
+    else out.Description = data.Description;
+  }
+  if (data.Manufacturing_date !== undefined) {
+    out.Manufacturing_date = data.Manufacturing_date || null;
+  }
+  if (data.Expired_date !== undefined) {
+    out.Expired_date = data.Expired_date || null;
+  }
+
+  // Variations: if present must be array of objects with NAME and PRICE
+  if (data.variations !== undefined) {
+    if (!Array.isArray(data.variations)) {
+      fieldErrors.variations = 'Variations must be an array';
+    } else {
+      const vErrs = [];
+      data.variations.forEach((v, i) => {
+        const ve = {};
+        if (!v || typeof v !== 'object') { vErrs[i] = { _error: 'Empty or invalid variant' }; return; }
+        if (!v.NAME || typeof v.NAME !== 'string') ve.NAME = 'Variant.NAME (string) required';
+        if (v.PRICE === undefined || v.PRICE === null || isNaN(Number(v.PRICE))) ve.PRICE = 'Variant.PRICE must be a number';
+          if (v.STOCK !== undefined && isNaN(Number(v.STOCK))) ve.STOCK = 'Variant.STOCK must be a number when provided';
+        if (Object.keys(ve).length) vErrs[i] = ve;
+      });
+      if (vErrs.length && vErrs.some(Boolean)) fieldErrors.variations = vErrs;
+      else out.variations = data.variations.map(v => ({ NAME: v.NAME, PRICE: Number(v.PRICE), STOCK: v.STOCK !== undefined ? Number(v.STOCK) : undefined }));
+    }
+  }
+
+  if (data.category !== undefined) {
+    if (typeof data.category !== 'string') fieldErrors.category = 'Category must be a string';
+    else out.category = data.category;
+  }
+
+  // Map Bar_code and Name explicitly when present
+  if (data.Bar_code !== undefined) out.Bar_code = data.Bar_code;
+  if (data.Name !== undefined) out.Name = data.Name;
+
+  if (Object.keys(fieldErrors).length) return { fieldErrors };
+  return { data: out };
 }
 
 const listProducts = async (req, res) => {
@@ -72,33 +117,68 @@ const createProduct = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
-    const data = req.body || {};
-
-    // Basic validation: ensure required fields are present and well-formed
-    const fieldErrors = {};
-    if (!data.Name && !data.name) fieldErrors.name = 'Product name is required';
-    if (data.variations && !Array.isArray(data.variations)) fieldErrors.variations = 'Variations must be an array';
-    if (Array.isArray(data.variations)) {
-      const vErrs = [];
-      data.variations.forEach((v, i) => {
-        const ve = {};
-        if (!v) { vErrs[i] = { _error: 'Empty variant' }; return; }
-        if (!(v.NAME || v.name)) ve.name = 'Variant name required';
-        const price = v.PRICE !== undefined ? v.PRICE : v.price;
-        if (price === undefined || price === null || isNaN(Number(price))) ve.price = 'Variant price must be a number';
-        if (Object.keys(ve).length) vErrs[i] = ve;
-      });
-      if (vErrs.length && vErrs.some(Boolean)) fieldErrors.variations = vErrs;
-    }
-
-    if (data.category && typeof data.category !== 'string') fieldErrors.category = 'Category must be a string';
-    if (Object.keys(fieldErrors).length) return res.status(400).json({ success: false, message: 'Validation failed', fieldErrors });
+    const incoming = req.body || {};
+    // Strict validation and mapping for create API
+    const { data, fieldErrors, error } = validateAndMapProductPayload(incoming, { forUpdate: false });
+    if (error) return res.status(400).json({ success: false, message: error });
+    if (fieldErrors) return res.status(400).json({ success: false, message: 'Validation failed', fieldErrors });
 
     const created = await productModel.createProduct(sellerId, data);
     res.status(201).json({ success: true, product: created });
   } catch (err) {
     console.error('sellerProductsController.createProduct error:', err);
     res.status(500).json({ success: false, message: 'Failed to create product', error: err.message });
+  }
+};
+
+const insertVariations = async (req, res) => {
+  try {
+    const sellerId = req.user?.Id;
+    const role = await userModel.checkRole(sellerId);
+    if (role !== 'seller' && role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const productId = req.params.id;
+    // Expect body to be either { variations: [...] } or an array directly
+    const incoming = req.body;
+    const variations = Array.isArray(incoming) ? incoming : incoming?.variations;
+
+    if (!Array.isArray(variations) || variations.length === 0) {
+      return res.status(400).json({ success: false, message: 'Validation failed', fieldErrors: { variations: 'Variations array required' }});
+    }
+
+    // Basic validation here (optional - you already have model validation in validateAndMapProductPayload)
+    const vErrs = [];
+    variations.forEach((v, i) => {
+      const ve = {};
+      if (!v || typeof v !== 'object') { ve._error = 'Invalid variant'; vErrs[i] = ve; return; }
+      if (!v.NAME) ve.NAME = 'Variant.NAME required';
+      if (v.PRICE === undefined || v.PRICE === null || isNaN(Number(v.PRICE))) ve.PRICE = 'Variant.PRICE must be a number';
+      if (v.STOCK !== undefined && isNaN(Number(v.STOCK))) ve.STOCK = 'Variant.STOCK must be a number';
+      if (Object.keys(ve).length) vErrs[i] = ve;
+    });
+    if (vErrs.length && vErrs.some(Boolean)) {
+      return res.status(400).json({ success: false, message: 'Validation failed', fieldErrors: { variations: vErrs }});
+    }
+
+    // Normalize to expected variation objects with NAME and PRICE
+    const normalized = variations.map(v => ({ NAME: v.NAME, PRICE: Number(v.PRICE), STOCK: v.STOCK !== undefined ? Number(v.STOCK) : undefined }));
+
+    const result = await productModel.addVariationsForProduct(sellerId, productId, normalized);
+    if (!result) {
+      return res.status(500).json({ success: false, message: 'Failed to add variations' });
+    }
+    if (result.success === false && result.reason === 'not_found') {
+      return res.status(404).json({ success: false, message: 'Product not found or not owned by seller' });
+    }
+
+    // Return the updated product
+    const product = await productModel.getProductByBarcode(sellerId, productId);
+    return res.status(200).json({ success: true, product });
+  } catch (err) {
+    console.error('sellerProductsController.insertVariations error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to insert variations', error: err.message });
   }
 };
 
@@ -111,13 +191,10 @@ const updateProduct = async (req, res) => {
     }
     const productId = req.params.id;
     const incoming = req.body || {};
-    // Normalize keys so model.updateProduct sees consistent field names
-    const data = normalizeProductPayload(incoming);
-
-    // Validate variants shape if present (do not allow invalid variants)
-    if (data.variations && !Array.isArray(data.variations)) {
-      return res.status(400).json({ success: false, message: 'Validation failed', fieldErrors: { variations: 'Variations must be an array' } });
-    }
+    // Strictly validate incoming payload and map to model fields
+    const { data, fieldErrors, error } = validateAndMapProductPayload(incoming, { forUpdate: true });
+    if (error) return res.status(400).json({ success: false, message: error });
+    if (fieldErrors) return res.status(400).json({ success: false, message: 'Validation failed', fieldErrors });
 
     const updated = await productModel.updateProduct(sellerId, productId, data);
     if (!updated) return res.status(404).json({ success: false, message: 'Product not found or not owned by seller' });
@@ -160,4 +237,5 @@ module.exports = {
   updateProduct,
   patchProduct,
   deleteProduct,
+  insertVariations,
 };
