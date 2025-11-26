@@ -2,6 +2,14 @@ const { S3Client } = require('@aws-sdk/client-s3');
 const multer = require('multer');
 const multerS3 = require('multer-s3');
 
+// Validate required AWS env vars early so error is clearer than "bucket is required"
+const requiredAws = ['AWS_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_S3_BUCKET'];
+const missing = requiredAws.filter((k) => !process.env[k]);
+if (missing.length) {
+  console.error('Missing AWS env vars for S3 upload:', missing.join(', '));
+  throw new Error(`Missing AWS env vars: ${missing.join(', ')}`);
+}
+
 // Configure AWS S3 client
 const s3Client = new S3Client({
   region: process.env.AWS_REGION,
