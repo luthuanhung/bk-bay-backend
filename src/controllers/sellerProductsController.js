@@ -59,6 +59,20 @@ function validateAndMapProductPayload(data, { forUpdate = false } = {}) {
     else out.category = data.category;
   }
 
+  // Images: optional array of image URL strings
+  if (data.images !== undefined) {
+    if (!Array.isArray(data.images)) {
+      fieldErrors.images = 'Images must be an array of URL strings';
+    } else {
+      const iErrs = [];
+      data.images.forEach((u, i) => {
+        if (typeof u !== 'string') iErrs[i] = 'Image URL must be a string';
+      });
+      if (iErrs.length && iErrs.some(Boolean)) fieldErrors.images = iErrs;
+      else out.images = data.images;
+    }
+  }
+  
   // Map Bar_code and Name explicitly when present
   if (data.Bar_code !== undefined) out.Bar_code = data.Bar_code;
   if (data.Name !== undefined) out.Name = data.Name;

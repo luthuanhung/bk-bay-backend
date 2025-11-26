@@ -127,6 +127,11 @@ async function createProduct(sellerId, data) {
       await persistVariations(transaction, barCode, data.variations);
     }
 
+    // Persist images (if provided) into IMAGES table
+    if (Array.isArray(data.images) && data.images.length) {
+      await persistImages(transaction, barCode, data.images);
+    }
+    
     // Persist category relationship (Belongs_to)
     if (data.category) {
       await upsertBelongsTo(transaction, barCode, data.category);
@@ -196,6 +201,18 @@ async function updateProduct(sellerId, barCode, data) {
     if (Array.isArray(data.variations)) {
       // remove existing for this barcode and insert new set
       await persistVariations(transaction, barCode, data.variations);
+    }
+
+    // Persist images if provided: overwrite existing images for this barcode
+    if (data.images !== undefined) {
+      // If null or empty array -> remove existing images
+      if (!Array.isArray(data.images) || data.images.length === 0) {
+        const delI = new sql.Request(transaction);
+        delI.input('barCode', sql.VarChar, barCode);
+        await delI.query('DELETE FROM IMAGES WHERE Bar_code = @barCode');
+      } else {
+        await persistImages(transaction, barCode, data.images);
+      }
     }
 
     // Update category mapping if provided (null means remove)
@@ -278,6 +295,42 @@ async function persistVariations(transaction, barCode, variations) {
     ? `INSERT INTO VARIATIONS (Bar_code, NAME, PRICE, STOCK) VALUES ${inserts.join(',')}`
     : `INSERT INTO VARIATIONS (Bar_code, NAME, PRICE) VALUES ${inserts.join(',')}`;
 
+  await req.query(insertQuery);
+}
+
+// Persist images for a product inside a transaction.
+// Strategy: if IMAGES table exists, delete existing rows for the barcode and batch-insert provided image URLs.
+async function persistImages(transaction, barCode, images) {
+  if (!Array.isArray(images)) return;
+
+  // Check if IMAGES table appears to exist with IMAGE_URL column
+  try {
+    const tableCheck = await hasColumn(transaction, 'IMAGES', 'IMAGE_URL');
+    if (!tableCheck) {
+      return; // nothing to do if table missing
+    }
+  } catch (e) {
+    return;
+  }
+
+  // Delete existing images for this barcode
+  const delReq = new sql.Request(transaction);
+  delReq.input('barCode', sql.VarChar, barCode);
+  await delReq.query('DELETE FROM IMAGES WHERE Bar_code = @barCode');
+
+  // Prepare batch insert
+  const inserts = [];
+  const req = new sql.Request(transaction);
+  req.input('barCode', sql.VarChar, barCode);
+  images.forEach((img, idx) => {
+    const key = `url${idx}`;
+    req.input(key, sql.VarChar, img || '');
+    inserts.push(`(@barCode, @${key})`);
+  });
+
+  if (!inserts.length) return;
+
+  const insertQuery = `INSERT INTO IMAGES (Bar_code, IMAGE_URL) VALUES ${inserts.join(',')}`;
   await req.query(insertQuery);
 }
 
