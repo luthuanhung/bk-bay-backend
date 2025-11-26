@@ -7,7 +7,8 @@ const {
     getProductByName,
     getAllProduct,
     getProductByCategory,
-    getProductDetails
+    getProductDetails,
+    assignCategory
 } = require('../controllers/productController');
 
 // Public routes
@@ -19,6 +20,9 @@ router.get('/search', getProductByName);
 
 // Get all products
 router.get('/all', getAllProduct);
+
+// Assign category to product: POST /api/products/:barcode/category
+router.post('/:barcode/category', assignCategory);
 
 // Generic barcode route must come last to avoid capturing other routes
 router.get('/:barcode', getProductDetails);

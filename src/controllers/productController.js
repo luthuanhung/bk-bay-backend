@@ -179,10 +179,65 @@ const getProductByCategory = async (req, res) => {
     }
 };
 
+/**
+ * POST /api/products/:barcode/category
+ * Assign or update category for a product
+ * Body: { categoryName: string }
+ */
+const assignCategory = async (req, res) => {
+    try {
+        const { barcode } = req.params;
+        const { categoryName } = req.body;
+
+        if (!barcode) {
+            return res.status(400).json({
+                success: false,
+                message: 'barcode is required'
+            });
+        }
+
+        if (!categoryName) {
+            return res.status(400).json({
+                success: false,
+                message: 'categoryName is required in request body'
+            });
+        }
+
+        const result = await productModel.assignCategoryToProduct(barcode, categoryName);
+
+        res.status(200).json({
+            success: true,
+            message: result.message,
+            data: { barcode, categoryName }
+        });
+    } catch (err) {
+        // Distinguish between different error types
+        if (err.message.includes('does not exist')) {
+            return res.status(404).json({
+                success: false,
+                message: err.message
+            });
+        }
+        if (err.message.includes('not found')) {
+            return res.status(404).json({
+                success: false,
+                message: err.message
+            });
+        }
+
+        res.status(500).json({
+            success: false,
+            message: 'Failed to assign category',
+            error: err.message
+        });
+    }
+};
+
 module.exports = {
     getCategories,
     getProductByCategory,
     getProductByName,
     getAllProduct,
     getProductDetails,
+    assignCategory,
 };

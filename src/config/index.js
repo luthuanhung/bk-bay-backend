@@ -13,6 +13,7 @@ const sellerProductsRoutes = require('../routes/sellerProductsRoutes')
 const shipperRoutes = require('../routes/shipperRoutes');
 const uploadRoutes = require('../routes/uploadRoutes');
 const orderRoutes = require('../routes/orderRoutes');
+const categoryRoutes = require('../routes/categoryRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -34,6 +35,7 @@ app.use(cookieParser());
 app.use('/api/users', userRoutes);
 app.use('/api/cart', cartRoutes);
 app.use('/api/reviews', reviewRoutes);
+app.use('/api/categories', categoryRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/seller', sellerProductsRoutes);
 app.use('/api/shipper', shipperRoutes);

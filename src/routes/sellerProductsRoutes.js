@@ -12,4 +12,6 @@ router.put('/products/:id', verifyToken, controller.updateProduct);
 router.patch('/products/:id', verifyToken, controller.patchProduct);
 router.delete('/products/:id', verifyToken, controller.deleteProduct);
 
+
+
 module.exports = router;
