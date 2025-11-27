@@ -5,20 +5,35 @@ const verifyToken = require('../middleware/auth');
 const {
   getReviews,
   createReview,
-  markHelpful
+  markHelpful,
+  upsertReaction,
+  getPurchasedItems,
+  getProductList
 } = require('../controllers/reviewController');
-const { upsertReaction } = require('../controllers/reviewController');
 
-// Public: GET /api/reviews?productId=...
+// --- 1. CÁC ROUTE CỤ THỂ (STATIC ROUTES) - PHẢI ĐỂ TRÊN CÙNG ---
+
+// Lấy danh sách sản phẩm cho Dropdown
+router.get('/products', getProductList);
+
+// [QUAN TRỌNG] Route này phải nằm TRÊN route /:id
+// Lấy danh sách hàng đã mua chờ đánh giá
+router.get('/purchased', verifyToken, getPurchasedItems);
+
+
+// --- 2. CÁC ROUTE ĐỘNG (DYNAMIC ROUTES) - ĐỂ DƯỚI CÙNG ---
+
+// Lấy review theo ID sản phẩm (VD: /api/reviews/BOOK-005)
+// Nếu để dòng này lên trên, nó sẽ "ăn" mất chữ "purchased"
+router.get('/:id', getReviews); 
+
+// Fallback (Query param)
 router.get('/', getReviews);
 
-// Protected: POST /api/reviews  (create review)
+
+// --- 3. CÁC ROUTE POST (KHÔNG ẢNH HƯỞNG THỨ TỰ DO KHÁC METHOD) ---
 router.post('/', verifyToken, createReview);
-
-// Protected: POST /api/reviews/:id/helpful  (mark helpful)
 router.post('/:id/helpful', verifyToken, markHelpful);
-
-// Protected: POST /api/reviews/:id/reactions  (upsert reaction)
 router.post('/:id/reactions', verifyToken, upsertReaction);
 
 module.exports = router;

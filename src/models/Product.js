@@ -52,10 +52,6 @@ async function listProductsBySeller(sellerId, opts = {}) {
   FROM Product_SKU p
   OUTER APPLY (SELECT TOP 1 IMAGE_URL FROM IMAGES WHERE Bar_code = p.Bar_code) i
   ${whereClause} ORDER BY ${orderCol} ${dir} OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`;
-  // Dev log to help debug schema mismatches
-  if (process.env.NODE_ENV !== 'production') {
-    console.debug('listProductsBySeller query:', query, { sellerId, limit, offset, search, minPrice, maxPrice, size, color, orderBy, order });
-  }
 
   const result = await request.query(query);
   return result.recordset || [];

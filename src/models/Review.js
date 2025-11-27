@@ -3,74 +3,89 @@ const sql = require('mssql');
 const userModel = require('./User');
 const { generateId } = require('../utils/userUtils');
 
-// Note: your DB schema stores review basic info in Review and links to orders via Write_review and Order_Item.
-// Content and reactions use Replies and Reactions tables. The functions below adapt to that schema.
-
-async function getReviewsByProductId(barcode) {
+// Try to get product reviews via stored proc usp_GetProductReviews.
+// If proc missing, fallback to manual JOIN query.
+async function getReviewsByProductId(barcode, filterRating = null, sortBy = 'DESC') {
     const req = pool.request();
-    req.input('barcode', sql.VarChar, barcode);
+    req.input('Barcode', sql.VarChar, barcode);
+    req.input('FilterRating', sql.Int, filterRating);
+    req.input('SortByDate', sql.VarChar, sortBy);
 
-    const q = `
-        SELECT R.ID as ReviewID, R.Rating, R.[Time] as CreatedAt, WR.UserID
-        FROM Review R
-        INNER JOIN Write_review WR ON R.ID = WR.ReviewID
-        INNER JOIN Order_Item OI ON WR.Order_itemID = OI.ID
-        WHERE OI.BarCode = @barcode
-        ORDER BY R.[Time] DESC
-    `;
-
-    const result = await req.query(q);
-    const rows = result.recordset || [];
-
-    // For each review, fetch username, content (from Replies if exists), and helpful count (from Reactions)
-    const reviews = await Promise.all(rows.map(async (r) => {
-        const reviewId = r.ReviewID;
-        const userId = r.UserID;
-
-        // username
-        let username;
-        try {
-            const u = userId ? await userModel.getUserById(userId) : null;
-            username = u ? (u.Username || u.username || u.Name) : undefined;
-        } catch (e) {
-            username = undefined;
-        }
-
-        // content: try to find the original review content in Replies table authored by same user
-        let content = undefined;
-        try {
-            const creq = pool.request();
-            creq.input('reviewId', sql.VarChar, reviewId);
-            creq.input('author', sql.VarChar, userId);
-            const cres = await creq.query(`SELECT TOP 1 Content FROM Replies WHERE ReviewID = @reviewId AND Author = @author ORDER BY [Time] ASC`);
-            if (cres.recordset && cres.recordset[0]) content = cres.recordset[0].Content;
-        } catch (e) {
-            content = undefined;
-        }
-
-        // helpfulCount: count reactions with Type = 'helpful'
-        let helpfulCount = 0;
-        try {
-            const hreq = pool.request();
-            hreq.input('reviewId', sql.VarChar, reviewId);
-            const hres = await hreq.query(`SELECT COUNT(*) AS c FROM Reactions WHERE ReviewID = @reviewId AND [Type] = 'helpful'`);
-            helpfulCount = (hres.recordset && hres.recordset[0]) ? Number(hres.recordset[0].c) : 0;
-        } catch (e) {
-            helpfulCount = 0;
-        }
-
-        return {
-            id: reviewId,
+    // Prefer stored proc
+    try {
+        const result = await req.execute('usp_GetProductReviews');
+        const rows = result.recordset || [];
+        // Map rows into frontend-friendly shape
+        return rows.map(r => ({
+            id: r.ReviewID,
             rating: r.Rating,
-            userId,
-            username,
-            content,
-            helpfulCount,
-            createdAt: r.CreatedAt ? new Date(r.CreatedAt).toISOString() : undefined
-        };
-    }));
+            content: r.Content, // <-- Added this based on the SP change (r.Description as Content)
+            username: r.AuthorName,
+            variationName: r.VariationName,
+            totalReactions: r.TotalReactions || 0,
+            createdAt: r.ReviewDate ? new Date(r.ReviewDate).toISOString() : undefined
+        }));
+    } catch (err) {
+        // Fallback to manual query if proc not present
+        const fallbackReq = pool.request();
+        fallbackReq.input('barcode', sql.VarChar, barcode);
+        // Modified query to fetch Description from Review table directly
+        const q = `
+            SELECT 
+                R.ID as ReviewID, 
+                R.Rating, 
+                R.Description as Content, -- <-- Fetch Description and alias as Content
+                R.[Time] as CreatedAt, 
+                WR.UserID
+            FROM Review R
+            INNER JOIN Write_review WR ON R.ID = WR.ReviewID
+            INNER JOIN Order_Item OI ON WR.Order_itemID = OI.ID AND WR.OrderID = OI.orderID
+            WHERE OI.BarCode = @barcode
+            ORDER BY R.[Time] ${sortBy === 'ASC' ? 'ASC' : 'DESC'}
+        `;
+        const res = await fallbackReq.query(q);
+        const rows = res.recordset || [];
 
-    return reviews;
+        const reviews = await Promise.all(rows.map(async (r) => {
+            const reviewId = r.ReviewID;
+            const userId = r.UserID;
+
+            // username
+            let username;
+            try {
+                const u = userId ? await userModel.getUserById(userId) : null;
+                username = u ? (u.Username || u.username || u.Full_Name || u.Name) : undefined;
+            } catch (e) {
+                username = undefined;
+            }
+
+            // content is now directly available from the main query as r.Content
+            const content = r.Content;
+
+            // helpfulCount
+            let helpfulCount = 0;
+            try {
+                const hreq = pool.request();
+                hreq.input('reviewId', sql.VarChar, reviewId);
+                const hres = await hreq.query(`SELECT COUNT(*) AS c FROM Reactions WHERE ReviewID = @reviewId AND [Type] = 'helpful'`);
+                helpfulCount = (hres.recordset && hres.recordset[0]) ? Number(hres.recordset[0].c) : 0;
+            } catch (e) {
+                helpfulCount = 0;
+            }
+
+            return {
+                id: reviewId,
+                rating: r.Rating,
+                userId,
+                username,
+                content, // <-- Use content from query
+                helpfulCount,
+                createdAt: r.CreatedAt ? new Date(r.CreatedAt).toISOString() : undefined
+            };
+        }));
+
+        return reviews;
+    }
 }
 
 async function getReviewById(reviewId) {
@@ -85,14 +100,13 @@ async function getReviewById(reviewId) {
     const row = res.recordset && res.recordset[0];
     if (!row) return null;
 
-    // reuse logic from getReviews to populate content and helpful count
+    // Populate content and helpful count
     const reviews = await getReviewsByProductIdForReviewId(row.ReviewID, row.UserID, row.Rating, row.CreatedAt);
     return reviews[0] || null;
 }
 
-// helper used by getReviewById
+// helper for getReviewById
 async function getReviewsByProductIdForReviewId(reviewId, userId, rating, createdAt) {
-    // content
     let content;
     try {
         const creq = pool.request();
@@ -104,7 +118,6 @@ async function getReviewsByProductIdForReviewId(reviewId, userId, rating, create
         content = undefined;
     }
 
-    // helpfulCount
     let helpfulCount = 0;
     try {
         const hreq = pool.request();
@@ -118,7 +131,7 @@ async function getReviewsByProductIdForReviewId(reviewId, userId, rating, create
     let username;
     try {
         const u = userId ? await userModel.getUserById(userId) : null;
-        username = u ? (u.Username || u.username || u.Name) : undefined;
+        username = u ? (u.Username || u.username || u.Full_Name || u.Name) : undefined;
     } catch (e) {
         username = undefined;
     }
@@ -141,13 +154,16 @@ const createReview = async ({ id, orderId, orderItemId, userId, rating, content 
 
         const reviewId = id || generateId();
 
-        // Insert into Review
+        // Insert into Review table, now including the review content in the 'Description' column
         const rreq = new sql.Request(transaction);
         rreq.input('id', sql.VarChar, reviewId);
         rreq.input('rating', sql.Int, parseInt(rating, 10) || 0);
-        await rreq.query(`INSERT INTO Review (ID, Rating, [Time]) VALUES (@id, @rating, GETDATE())`);
+        // Per user, the column for review text in the Review table is 'Description'.
+        rreq.input('description', sql.NVarChar, content ? content.trim() : null);
 
-        // Insert into Write_review to link to order and buyer
+        await rreq.query(`INSERT INTO Review (ID, Rating, Description, [Time]) VALUES (@id, @rating, @description, GETDATE())`);
+
+        // Validate linkage params and insert into Write_review
         if (!orderId || !orderItemId || !userId) {
             await transaction.rollback();
             throw new Error('orderId, orderItemId and userId are required to link review (Write_review)');
@@ -159,14 +175,7 @@ const createReview = async ({ id, orderId, orderItemId, userId, rating, content 
         wreq.input('orderId', sql.VarChar, orderId);
         await wreq.query(`INSERT INTO Write_review (ReviewID, UserID, Order_itemID, OrderID) VALUES (@reviewId, @userId, @orderItemId, @orderId)`);
 
-        // If content provided, store it as a Replies row authored by the same user (schema doesn't have Content on Review)
-        if (content && content.trim()) {
-            const creq = new sql.Request(transaction);
-            creq.input('reviewId', sql.VarChar, reviewId);
-            creq.input('content', sql.NVarChar, content.trim());
-            creq.input('author', sql.VarChar, userId);
-            await creq.query(`INSERT INTO Replies (ReviewID, Content, Author, [Time]) VALUES (@reviewId, @content, @author, GETDATE())`);
-        }
+        // The logic to insert content into the 'Replies' table has been removed as the content is now correctly in 'Review.Description'.
 
         await transaction.commit();
 
@@ -175,8 +184,8 @@ const createReview = async ({ id, orderId, orderItemId, userId, rating, content 
             id: reviewId,
             rating: parseInt(rating, 10) || 0,
             userId,
-            username: user ? (user.Username || user.username || user.Name) : undefined,
-            content: content || undefined,
+            username: user ? (user.Username || user.username || user.Full_Name || user.Name) : undefined,
+            description: content || undefined,
             helpfulCount: 0,
             createdAt: new Date().toISOString()
         };
@@ -186,18 +195,20 @@ const createReview = async ({ id, orderId, orderItemId, userId, rating, content 
     }
 };
 
-// Upsert reaction: prefer stored procedure usp_Reactions_Upsert if exists, otherwise MERGE fallback
+// Upsert reaction using stored proc usp_Reactions_Upsert (preferred).
+// Proc signature (latest): @ReviewID, @Type, @Author
+// Fallback to MERGE if proc not present.
 const upsertReaction = async ({ reviewId, authorId, reactionType }) => {
     try {
         const req = pool.request();
         req.input('ReviewID', sql.VarChar, reviewId);
-        req.input('AuthorID', sql.VarChar, authorId);
-        req.input('ReactionType', sql.VarChar, reactionType);
-        // Try execute stored procedure; if it fails because not exists, fallback
+        req.input('Type', sql.VarChar, reactionType);
+        req.input('Author', sql.VarChar, authorId);
+
         try {
             await req.execute('usp_Reactions_Upsert');
         } catch (e) {
-            // fallback to MERGE
+            // fallback MERGE
             const mreq = pool.request();
             mreq.input('ReviewID', sql.VarChar, reviewId);
             mreq.input('Author', sql.VarChar, authorId);
@@ -213,13 +224,13 @@ const upsertReaction = async ({ reviewId, authorId, reactionType }) => {
             `);
         }
 
-        // return updated helpful count and optionally review
+        // Compute helpful count (Type = 'helpful')
         const hreq = pool.request();
         hreq.input('reviewId', sql.VarChar, reviewId);
         const hres = await hreq.query(`SELECT COUNT(*) AS c FROM Reactions WHERE ReviewID = @reviewId AND [Type] = 'helpful'`);
         const helpfulCount = (hres.recordset && hres.recordset[0]) ? Number(hres.recordset[0].c) : 0;
 
-        // Return a minimal review object with helpfulCount
+        // Return minimal review info including helpfulCount
         const sel = pool.request();
         sel.input('id', sql.VarChar, reviewId);
         const rres = await sel.query(`SELECT ID as ReviewID, Rating, [Time] as CreatedAt FROM Review WHERE ID = @id`);
@@ -235,9 +246,80 @@ const upsertReaction = async ({ reviewId, authorId, reactionType }) => {
     }
 };
 
+async function getPurchasedItemsForReview(userId) {
+    const mapRecord = (item) => ({
+        orderId: item.OrderID,
+        orderItemId: item.Order_ItemID,
+        // [FIX] Thêm dòng này để map ProductID trả về cho Frontend
+        productId: item.BarCode || item.ProductID, 
+        productName: item.ProductName,
+        variationName: item.VariationName,
+        price: item.Price,
+        purchaseDate: item.PurchaseDate,
+        productImage: item.ProductImage,
+    });
+
+    try {
+        const req = pool.request();
+        req.input('UserID', sql.VarChar, userId);
+        const result = await req.execute('usp_GetPurchasedItemsForReview');
+        return (result.recordset || []).map(mapRecord);
+    } catch (err) {
+        if (err.message.includes('Could not find stored procedure')) {
+            console.warn('[Review.model] Using fallback query.');
+            const fallbackReq = pool.request();
+            fallbackReq.input('UserID', sql.VarChar, userId);
+            
+            // [FIX] Đã thêm p.Bar_code vào câu SELECT bên dưới
+            const query = `
+                SELECT 
+                    o.ID AS OrderID,
+                    oi.ID AS Order_ItemID,
+                    p.Bar_code AS BarCode, -- <--- QUAN TRỌNG: Phải lấy cột này!
+                    p.Name AS ProductName,
+                    v.NAME AS VariationName,
+                    oi.Price,
+                    o.Time AS PurchaseDate,
+                    (SELECT TOP 1 IMAGE_URL FROM IMAGES img WHERE img.Bar_code = p.Bar_code) AS ProductImage
+                FROM [Order] o
+                JOIN Order_Item oi ON o.ID = oi.orderID
+                JOIN Product_SKU p ON oi.BarCode = p.Bar_code
+                LEFT JOIN VARIATIONS v ON oi.BarCode = v.Bar_code AND oi.Variation_Name = v.NAME
+                LEFT JOIN Write_review wr ON o.ID = wr.OrderID AND oi.ID = wr.Order_itemID
+                WHERE o.buyerID = @UserID
+                  AND o.Status IN ('Completed', 'Delivered')
+                  AND wr.ReviewID IS NULL
+                ORDER BY o.Time DESC;
+            `;
+            const result = await fallbackReq.query(query);
+            return (result.recordset || []).map(mapRecord);
+        }
+        throw err;
+    }
+}
+/**
+ * Get a simplified list of all products for UI selectors.
+ * Executes stored procedure `usp_GetAllProductsSimple`.
+ * @returns {Promise<Array>}
+ */
+async function getProductListSimple() {
+    try {
+        console.log('[Review.model.getProductListSimple] Executing usp_GetAllProductsSimple');
+        const result = await pool.request().execute('usp_GetAllProductsSimple');
+        return result.recordset || [];
+    } catch (error) {
+        console.error('[Review.model.getProductListSimple] ERROR:', error);
+        // If SP fails, we could have a fallback query here if needed.
+        // For now, just re-throw the error.
+        throw error;
+    }
+}
+
 module.exports = {
     getReviewsByProductId,
     getReviewById,
     createReview,
-    upsertReaction
+    upsertReaction,
+    getPurchasedItemsForReview,
+    getProductListSimple
 };
