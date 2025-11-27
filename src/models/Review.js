@@ -3,88 +3,39 @@ const sql = require('mssql');
 const userModel = require('./User');
 const { generateId } = require('../utils/userUtils');
 
-// Try to get product reviews via stored proc usp_GetProductReviews.
-// If proc missing, fallback to manual JOIN query.
+// 1. Get reviews (Cập nhật logic parse Replies)
 async function getReviewsByProductId(barcode, filterRating = null, sortBy = 'DESC') {
-    const req = pool.request();
-    req.input('Barcode', sql.VarChar, barcode);
-    req.input('FilterRating', sql.Int, filterRating);
-    req.input('SortByDate', sql.VarChar, sortBy);
-
-    // Prefer stored proc
     try {
+        const req = pool.request();
+        req.input('Barcode', sql.VarChar, barcode);
+        req.input('FilterRating', sql.Int, filterRating);
+        req.input('SortByDate', sql.VarChar, sortBy);
+
         const result = await req.execute('usp_GetProductReviews');
-        const rows = result.recordset || [];
-        // Map rows into frontend-friendly shape
-        return rows.map(r => ({
-            id: r.ReviewID,
-            rating: r.Rating,
-            content: r.Content, // <-- Added this based on the SP change (r.Description as Content)
-            username: r.AuthorName,
-            variationName: r.VariationName,
-            totalReactions: r.TotalReactions || 0,
-            createdAt: r.ReviewDate ? new Date(r.ReviewDate).toISOString() : undefined
-        }));
-    } catch (err) {
-        // Fallback to manual query if proc not present
-        const fallbackReq = pool.request();
-        fallbackReq.input('barcode', sql.VarChar, barcode);
-        // Modified query to fetch Description from Review table directly
-        const q = `
-            SELECT 
-                R.ID as ReviewID, 
-                R.Rating, 
-                R.Description as Content, -- <-- Fetch Description and alias as Content
-                R.[Time] as CreatedAt, 
-                WR.UserID
-            FROM Review R
-            INNER JOIN Write_review WR ON R.ID = WR.ReviewID
-            INNER JOIN Order_Item OI ON WR.Order_itemID = OI.ID AND WR.OrderID = OI.orderID
-            WHERE OI.BarCode = @barcode
-            ORDER BY R.[Time] ${sortBy === 'ASC' ? 'ASC' : 'DESC'}
-        `;
-        const res = await fallbackReq.query(q);
-        const rows = res.recordset || [];
-
-        const reviews = await Promise.all(rows.map(async (r) => {
-            const reviewId = r.ReviewID;
-            const userId = r.UserID;
-
-            // username
-            let username;
-            try {
-                const u = userId ? await userModel.getUserById(userId) : null;
-                username = u ? (u.Username || u.username || u.Full_Name || u.Name) : undefined;
-            } catch (e) {
-                username = undefined;
-            }
-
-            // content is now directly available from the main query as r.Content
-            const content = r.Content;
-
-            // helpfulCount
-            let helpfulCount = 0;
-            try {
-                const hreq = pool.request();
-                hreq.input('reviewId', sql.VarChar, reviewId);
-                const hres = await hreq.query(`SELECT COUNT(*) AS c FROM Reactions WHERE ReviewID = @reviewId AND [Type] = 'helpful'`);
-                helpfulCount = (hres.recordset && hres.recordset[0]) ? Number(hres.recordset[0].c) : 0;
-            } catch (e) {
-                helpfulCount = 0;
+        
+        return (result.recordset || []).map(r => {
+            // [LOGIC MỚI] Parse JSON từ SQL thành mảng object
+            let replies = [];
+            if (r.RepliesJSON) {
+                try {
+                    replies = JSON.parse(r.RepliesJSON);
+                } catch (e) { console.error('Error parsing replies JSON', e); }
             }
 
             return {
-                id: reviewId,
+                id: r.ReviewID,
                 rating: r.Rating,
-                userId,
-                username,
-                content, // <-- Use content from query
-                helpfulCount,
-                createdAt: r.CreatedAt ? new Date(r.CreatedAt).toISOString() : undefined
+                content: r.Content, 
+                username: r.AuthorName,
+                variationName: r.VariationName,
+                totalReactions: r.TotalReactions || 0,
+                createdAt: r.ReviewDate,
+                replies: replies // Trả về mảng replies thật
             };
-        }));
-
-        return reviews;
+        });
+    } catch (err) {
+        console.error('[ReviewModel] getReviewsByProductId Error:', err);
+        throw err;
     }
 }
 
@@ -315,11 +266,27 @@ async function getProductListSimple() {
     }
 }
 
+async function replyToReview({ reviewId, userId, content }) {
+    try {
+        const req = pool.request();
+        req.input('ReviewID', sql.VarChar, reviewId);
+        req.input('Author', sql.VarChar, userId);
+        req.input('Content', sql.NVarChar, content);
+
+        const result = await req.execute('usp_InsertReply');
+        return result.recordset[0]; // Trả về reply vừa tạo
+    } catch (err) {
+        console.error('[ReviewModel] replyToReview Error:', err);
+        throw err;
+    }
+}
+
 module.exports = {
     getReviewsByProductId,
     getReviewById,
     createReview,
     upsertReaction,
     getPurchasedItemsForReview,
-    getProductListSimple
+    getProductListSimple,
+    replyToReview
 };

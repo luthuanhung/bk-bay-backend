@@ -8,7 +8,8 @@ const {
   markHelpful,
   upsertReaction,
   getPurchasedItems,
-  getProductList
+  getProductList,
+  replyToReview
 } = require('../controllers/reviewController');
 
 // --- 1. CÁC ROUTE CỤ THỂ (STATIC ROUTES) - PHẢI ĐỂ TRÊN CÙNG ---
@@ -22,7 +23,7 @@ router.get('/purchased', verifyToken, getPurchasedItems);
 
 
 // --- 2. CÁC ROUTE ĐỘNG (DYNAMIC ROUTES) - ĐỂ DƯỚI CÙNG ---
-
+router.post('/:id/reply', verifyToken, replyToReview);
 // Lấy review theo ID sản phẩm (VD: /api/reviews/BOOK-005)
 // Nếu để dòng này lên trên, nó sẽ "ăn" mất chữ "purchased"
 router.get('/:id', getReviews); 
@@ -33,6 +34,7 @@ router.get('/', getReviews);
 
 // --- 3. CÁC ROUTE POST (KHÔNG ẢNH HƯỞNG THỨ TỰ DO KHÁC METHOD) ---
 router.post('/', verifyToken, createReview);
+
 router.post('/:id/helpful', verifyToken, markHelpful);
 router.post('/:id/reactions', verifyToken, upsertReaction);
 

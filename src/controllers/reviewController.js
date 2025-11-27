@@ -178,11 +178,37 @@ const getProductList = async (req, res) => {
     }
 };
 
+const replyToReview = async (req, res) => {
+    try {
+        const user = req.user; // Lấy từ verifyToken
+        if (!user) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+        const { id } = req.params; // Review ID
+        const { content } = req.body;
+
+        if (!content || !content.trim()) {
+            return res.status(400).json({ success: false, message: 'Content is required' });
+        }
+
+        const newReply = await reviewModel.replyToReview({
+            reviewId: id,
+            userId: user.Id,
+            content: content.trim()
+        });
+
+        res.status(201).json({ success: true, data: newReply });
+    } catch (error) {
+        console.error('[Reply] Error:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
 module.exports = {
   getReviews,
   createReview,
   markHelpful,
   upsertReaction,
   getPurchasedItems,
-  getProductList
+  getProductList,
+  replyToReview
 };
