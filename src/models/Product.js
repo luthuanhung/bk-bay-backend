@@ -445,6 +445,60 @@ async function getProductByCategory(category) {
   return result.recordset || [];
 }
 
+/*
+ * Assign or update a category for a product.
+ * Input: barcode (string), categoryName (string), sellerId (optional - for verification)
+ * Updates Belongs_to table with the category assignment.
+ */
+async function assignCategoryToProduct(barcode, categoryName, sellerId = null) {
+  if (!barcode || !categoryName) {
+    throw new Error('barcode and categoryName are required');
+  }
+
+  const transaction = new sql.Transaction(pool);
+  try {
+    await transaction.begin();
+    const req = new sql.Request(transaction);
+    req.input('barcode', sql.VarChar(100), barcode);
+    req.input('categoryName', sql.VarChar(100), categoryName);
+
+    // Optional: Verify product exists (and optionally belongs to seller)
+    if (sellerId) {
+      req.input('sellerId', sql.VarChar(100), sellerId);
+      const productCheck = await req.query(
+        'SELECT Bar_code FROM Product_SKU WHERE Bar_code = @barcode AND sellerID = @sellerId'
+      );
+      if (!productCheck.recordset || productCheck.recordset.length === 0) {
+        await transaction.rollback();
+        throw new Error('Product not found or does not belong to this seller');
+      }
+    }
+
+    // Verify category exists in Category table
+    const categoryCheck = await req.query(
+      'SELECT Name FROM Category WHERE Name = @categoryName'
+    );
+    if (!categoryCheck.recordset || categoryCheck.recordset.length === 0) {
+      await transaction.rollback();
+      throw new Error('Category does not exist');
+    }
+
+    // Delete any existing category assignment for this barcode
+    await req.query('DELETE FROM Belongs_to WHERE Barcode = @barcode');
+
+    // Insert new category assignment
+    await req.query(
+      'INSERT INTO Belongs_to (CategoryName, Barcode) VALUES (@categoryName, @barcode)'
+    );
+
+    await transaction.commit();
+    return { success: true, message: 'Category assigned successfully' };
+  } catch (err) {
+    try { await transaction.rollback(); } catch (e) {}
+    throw err;
+  }
+}
+
 module.exports = {
   listProductsBySeller,
   // input sellerID, barcode
@@ -466,5 +520,5 @@ module.exports = {
   // input barcode
   // returns product details, images, variations, category
   getProductDetails,
-  addVariationsForProduct,
+  assignCategoryToProduct, // assigns/updates category for a product
 };
